@@ -6,7 +6,9 @@ name: Package Docker Images
 #   2. mcp-server-chart-streamable-<version>-linux-amd64.tar
 #   3. mcp-server-chart-all-<version>-linux-amd64.tar   (contains both images)
 #
-# Images are built with `docker build` for linux/amd64 on an Ubuntu runner and
+# The images are compiled from the source code of this repository (this project
+# *is* @antv/mcp-server-chart), so no npm release has to exist beforehand.
+# They are built with `docker build` for linux/amd64 on an Ubuntu runner and
 # exported with `docker save`.
 on:
   release:
@@ -15,10 +17,6 @@ on:
     inputs:
       version:
         description: "Version used to tag the images and name the tarballs, e.g. 0.9.11. Defaults to the release tag or package.json version."
-        required: false
-        type: string
-      package_version:
-        description: "npm version of @antv/mcp-server-chart installed into the images. Defaults to the resolved version, falling back to 'latest'."
         required: false
         type: string
 
@@ -62,53 +60,31 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Packaging version: ${VERSION}"
 
-      - name: Resolve npm package version
-        id: package
-        env:
-          INPUT_PACKAGE_VERSION: ${{ inputs.package_version }}
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          set -euo pipefail
-          if [ -n "${INPUT_PACKAGE_VERSION}" ]; then
-            PACKAGE_VERSION="${INPUT_PACKAGE_VERSION}"
-          elif npm view "@antv/mcp-server-chart@${VERSION}" version >/dev/null 2>&1; then
-            PACKAGE_VERSION="${VERSION}"
-          else
-            PACKAGE_VERSION="latest"
-            echo "::warning::@antv/mcp-server-chart@${VERSION} is not published on npm yet, installing 'latest' instead."
-          fi
-          echo "package_version=${PACKAGE_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Installing @antv/mcp-server-chart@${PACKAGE_VERSION} into the images"
-
       - name: Build SSE image
         env:
           VERSION: ${{ steps.version.outputs.version }}
-          PACKAGE_VERSION: ${{ steps.package.outputs.package_version }}
         run: |
           set -euo pipefail
           docker build \
             --platform "${PLATFORM}" \
             --build-arg "NODE_VERSION=${NODE_VERSION}" \
-            --build-arg "MCP_SERVER_CHART_VERSION=${PACKAGE_VERSION}" \
             --tag "${SSE_IMAGE}:${VERSION}" \
             --tag "${SSE_IMAGE}:latest" \
             --file docker/sse/Dockerfile \
-            docker/sse
+            .
 
       - name: Build streamable HTTP image
         env:
           VERSION: ${{ steps.version.outputs.version }}
-          PACKAGE_VERSION: ${{ steps.package.outputs.package_version }}
         run: |
           set -euo pipefail
           docker build \
             --platform "${PLATFORM}" \
             --build-arg "NODE_VERSION=${NODE_VERSION}" \
-            --build-arg "MCP_SERVER_CHART_VERSION=${PACKAGE_VERSION}" \
             --tag "${STREAMABLE_IMAGE}:${VERSION}" \
             --tag "${STREAMABLE_IMAGE}:latest" \
             --file docker/streamable/Dockerfile \
-            docker/streamable
+            .
 
       - name: Smoke test images
         env:

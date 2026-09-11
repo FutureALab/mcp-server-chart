@@ -2,7 +2,6 @@
 .git/
 node_modules/
 dist/
-docker/
 build/
 .vscode/
 .idea/
@@ -17,7 +16,6 @@ coverage/
 __tests__/
 *.swp
 README.md
-Dockerfile
 docker-compose.yaml
 .dockerignore
 .gitignore
