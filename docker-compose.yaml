@@ -1,39 +1,127 @@
+# Local, internet-free stack for @antv/mcp-server-chart.
+#
+#   mcp-server-chart  ──▶  chart-renderer  ──▶  minio
+#
+# The MCP server posts every chart spec to `VIS_REQUEST_SERVER`. The
+# `chart-renderer` service (the local SSR tool in docker/gpt-vis-api) rasterises
+# it with @antv/gpt-vis-ssr and stores the PNG in MinIO. The URL that comes back
+# points at MinIO, so the MCP client (browser / Claude Desktop / Dify ...) can
+# open the image afterwards.
+#
+# Online build from source:
+#
+#   docker compose up -d --build
+#
+# Offline (no registry access) from the tarballs published by
+# .github/workflows/docker-release.yml:
+#
+#   sh docker/load-images.sh /path/to/downloaded/tarballs
+#   docker compose up -d
+#
+# Loaded images are used as they are: nothing is pulled and nothing is rebuilt.
+name: mcp-server-chart
+
 services:
-  # Private chart render service, see docker/renderer/README.md
+  # Private chart render service (docker/gpt-vis-api, started with `pnpm start`
+  # inside the image). It renders chart specs to PNG and stores them in MinIO.
   chart-renderer:
+    image: mcp-server-chart-renderer:${MCP_CHART_VERSION:-latest}
     build:
-      context: .
-      dockerfile: docker/renderer/Dockerfile
-    image: mcp-server-chart-renderer:local
+      context: ./docker/gpt-vis-api
+      dockerfile: Dockerfile
     container_name: mcp-server-chart-renderer-1
+    restart: unless-stopped
+    depends_on:
+      minio:
+        # MinIO has to answer before the renderer starts: the bucket is created
+        # once at startup and never retried.
+        condition: service_healthy
     environment:
-      # The MCP client (browser / Claude Desktop / Dify ...) fetches the image URL
-      # returned by this service, so it must be an address the client can reach.
-      - PUBLIC_BASE_URL=http://127.0.0.1:3000
+      - PORT=3000
+      # Inside the compose network the service name resolves to MinIO, while
+      # MINIO_PUBLIC_DOMAIN below has to be reachable from the MCP client.
+      - MINIO_ENDPOINT=minio
+      - MINIO_PORT=9000
+      - MINIO_USE_SSL=false
+      - MINIO_ACCESS_KEY=${MINIO_ROOT_USER:-admin}
+      - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD:-12345678}
+      - MINIO_BUCKET=${MINIO_BUCKET:-chart-images}
+      # Address the MCP client (not the compose network) uses to fetch images.
+      # Use the host IP/domain instead of 127.0.0.1 when the client runs on
+      # another machine.
+      - MINIO_PUBLIC_DOMAIN=${MINIO_PUBLIC_DOMAIN:-http://127.0.0.1:19200}
     ports:
       - "3000:3000"
-    volumes:
-      - chart-renderer-data:/var/lib/chart-renderer
+    healthcheck:
+      # The SSR service has no dedicated /healthz endpoint: any HTTP answer on
+      # the port (including its JSON 404) means Express is listening.
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"fetch('http://127.0.0.1:3000/').then(() => process.exit(0)).catch(() => process.exit(1))\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
 
-  mcp-server-chart:
-    build:
-      context: .          # Dockerfile dir
-      dockerfile: Dockerfile
-    image: mcp-server-chart:stable
-    container_name: mcp-server-chart-1
-    depends_on:
-      - chart-renderer
+  minio:
+    image: minio/minio:${MINIO_TAG:-RELEASE.2025-04-22T22-12-26Z}
+    container_name: chart-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
     environment:
-      # Inside the compose network use the service name, not 127.0.0.1.
-      # You can use AntV's project GPT-Vis-SSR to deploy an HTTP service in a
-      # private environment, and then pass the URL address through env
-      # VIS_REQUEST_SERVER, see docker/renderer/README.md.
-      - VIS_REQUEST_SERVER=http://chart-renderer:3000/render
-    command: ["node", "build/index.js", "--transport", "sse", "--port", "1122", "--host", "0.0.0.0"]
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-admin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-12345678}
+    ports:
+      - "19200:9000" # S3 API, also the port used by MINIO_PUBLIC_DOMAIN
+      - "19201:9001" # web console
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  # MCP server over the streamable HTTP transport, reachable on :1122/mcp.
+  mcp-server-chart:
+    image: mcp-server-chart-streamable:${MCP_CHART_VERSION:-latest}
+    build:
+      context: .
+      dockerfile: docker/streamable/Dockerfile
+    container_name: mcp-server-chart-1
+    restart: unless-stopped
+    depends_on:
+      chart-renderer:
+        condition: service_healthy
+    environment:
+      - VIS_REQUEST_SERVER=http://chart-renderer:3000/generate
+      # Geographic charts need AntV's online POI/map data, so the private
+      # renderer cannot serve them. Remove this line to keep the tools enabled.
+      - DISABLED_TOOLS=generate_district_map,generate_path_map,generate_pin_map
     ports:
       - "1122:1122"
-# networks:
-#     - internal
+
+  # Same server over SSE, reachable on :1123/sse. Opt in with:
+  #   docker compose --profile sse up -d
+  mcp-server-chart-sse:
+    profiles: ["sse"]
+    image: mcp-server-chart-sse:${MCP_CHART_VERSION:-latest}
+    build:
+      context: .
+      dockerfile: docker/sse/Dockerfile
+    container_name: mcp-server-chart-sse-1
+    restart: unless-stopped
+    depends_on:
+      chart-renderer:
+        condition: service_healthy
+    environment:
+      - VIS_REQUEST_SERVER=http://chart-renderer:3000/generate
+      - DISABLED_TOOLS=generate_district_map,generate_path_map,generate_pin_map
+    ports:
+      - "1123:1123"
 
 volumes:
-  chart-renderer-data:
+  minio-data:

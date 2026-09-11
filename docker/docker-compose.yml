@@ -1,17 +1,95 @@
-name: mcp-server-chart
+# Full local stack, started from inside the docker/ directory:
+#
+#   cd docker && docker compose up -d --build
+#
+# Same topology as the repository root docker-compose.yaml, but this file runs
+# both MCP transports (SSE on :1123, streamable HTTP on :1122) next to the
+# private renderer (docker/gpt-vis-api) and its MinIO image storage.
+#
+# Offline: load the tarballs from .github/workflows/docker-release.yml first,
+# then `docker compose up -d` without --build.
+name: mcp-server-chart-docker
+
 services:
   sse:
-    restart: unless-stopped
+    image: mcp-server-chart-sse:${MCP_CHART_VERSION:-latest}
     build:
       context: ..
       dockerfile: docker/sse/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      chart-renderer:
+        condition: service_healthy
+    environment:
+      - VIS_REQUEST_SERVER=http://chart-renderer:3000/generate
+      - DISABLED_TOOLS=generate_district_map,generate_path_map,generate_pin_map
     ports:
       - "1123:1123"
 
   streamable:
-    restart: unless-stopped
+    image: mcp-server-chart-streamable:${MCP_CHART_VERSION:-latest}
     build:
       context: ..
       dockerfile: docker/streamable/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      chart-renderer:
+        condition: service_healthy
+    environment:
+      - VIS_REQUEST_SERVER=http://chart-renderer:3000/generate
+      - DISABLED_TOOLS=generate_district_map,generate_path_map,generate_pin_map
     ports:
       - "1122:1122"
+
+  chart-renderer:
+    image: mcp-server-chart-renderer:${MCP_CHART_VERSION:-latest}
+    build:
+      context: ./gpt-vis-api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      - PORT=3000
+      - MINIO_ENDPOINT=minio
+      - MINIO_PORT=9000
+      - MINIO_USE_SSL=false
+      - MINIO_ACCESS_KEY=${MINIO_ROOT_USER:-admin}
+      - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD:-12345678}
+      - MINIO_BUCKET=${MINIO_BUCKET:-chart-images}
+      - MINIO_PUBLIC_DOMAIN=${MINIO_PUBLIC_DOMAIN:-http://127.0.0.1:19200}
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"fetch('http://127.0.0.1:3000/').then(() => process.exit(0)).catch(() => process.exit(1))\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  minio:
+    image: minio/minio:${MINIO_TAG:-RELEASE.2025-04-22T22-12-26Z}
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-admin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-12345678}
+    ports:
+      - "19200:9000"
+      - "19201:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+volumes:
+  minio-data:

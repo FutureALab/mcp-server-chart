@@ -1,15 +1,23 @@
 name: Package Docker Images
 
-# Packages the SSE and streamable HTTP images of the MCP server and attaches
-# three tarballs (docker save output) to the GitHub release:
+# Packages every image the stack in docker-compose.yaml needs, and attaches the
+# `docker save` tarballs to the GitHub release:
+#
 #   1. mcp-server-chart-sse-<version>-linux-amd64.tar
 #   2. mcp-server-chart-streamable-<version>-linux-amd64.tar
-#   3. mcp-server-chart-all-<version>-linux-amd64.tar   (contains both images)
+#   3. mcp-server-chart-renderer-<version>-linux-amd64.tar   (docker/gpt-vis-api)
+#   4. minio-<minio-tag>-linux-amd64.tar
+#   5. mcp-server-chart-all-<version>-linux-amd64.tar        (all four images)
 #
-# The images are compiled from the source code of this repository (this project
-# *is* @antv/mcp-server-chart), so no npm release has to exist beforehand.
-# They are built with `docker build` for linux/amd64 on an Ubuntu runner and
-# exported with `docker save`.
+# One download is enough for an offline machine:
+#
+#   docker load -i mcp-server-chart-all-<version>-linux-amd64.tar
+#   docker compose up -d
+#
+# The three chart images are compiled from the sources of this repository (this
+# project *is* @antv/mcp-server-chart), so no npm release has to exist
+# beforehand. They are built for linux/amd64 on an Ubuntu runner and exported
+# with `docker save`.
 on:
   release:
     types: [published]
@@ -29,12 +37,16 @@ env:
   NODE_VERSION: "22"
   SSE_IMAGE: mcp-server-chart-sse
   STREAMABLE_IMAGE: mcp-server-chart-streamable
+  RENDERER_IMAGE: mcp-server-chart-renderer
+  MINIO_IMAGE: minio/minio
+  # Keep in sync with the MinIO default in docker-compose.yaml.
+  MINIO_TAG: RELEASE.2025-04-22T22-12-26Z
 
 jobs:
   package:
     name: Build and save Docker image tarballs
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
@@ -86,7 +98,26 @@ jobs:
             --file docker/streamable/Dockerfile \
             .
 
-      - name: Smoke test images
+      - name: Build chart renderer image
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # The local SSR tool (docker/gpt-vis-api, `pnpm start`) renders the
+          # charts; its build context is its own directory.
+          docker build \
+            --platform "${PLATFORM}" \
+            --tag "${RENDERER_IMAGE}:${VERSION}" \
+            --tag "${RENDERER_IMAGE}:latest" \
+            --file docker/gpt-vis-api/Dockerfile \
+            docker/gpt-vis-api
+
+      - name: Pull MinIO image
+        run: |
+          set -euo pipefail
+          docker pull --platform "${PLATFORM}" "${MINIO_IMAGE}:${MINIO_TAG}"
+
+      - name: Smoke test the MCP transports
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
@@ -121,25 +152,102 @@ jobs:
           echo "Streamable endpoint /mcp responded with: ${streamable_body}"
           echo "${streamable_body}" | grep --quiet '"jsonrpc"'
 
-          docker images --filter "reference=${SSE_IMAGE}" --filter "reference=${STREAMABLE_IMAGE}"
-
-      - name: Save images as tarballs
+      - name: Smoke test chart rendering (MCP server + renderer + MinIO)
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
 
+          network=chart-smoke
+          docker network create "${network}"
+          cleanup() {
+            docker rm --force mcp-smoke renderer-smoke minio-smoke >/dev/null 2>&1 || true
+            docker network rm "${network}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          # Storage for the rendered PNG files.
+          docker run --detach --name minio-smoke --network "${network}" \
+            --publish 19200:9000 \
+            --env MINIO_ROOT_USER=admin \
+            --env MINIO_ROOT_PASSWORD=12345678 \
+            "${MINIO_IMAGE}:${MINIO_TAG}" server /data
+
+          minio_status=""
+          for _ in $(seq 1 30); do
+            minio_status="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 5 \
+              http://127.0.0.1:19200/minio/health/live || true)"
+            [ "${minio_status}" = "200" ] && break
+            sleep 2
+          done
+          echo "MinIO health endpoint responded with HTTP ${minio_status}"
+          [ "${minio_status}" = "200" ]
+
+          # Private SSR renderer. MINIO_PUBLIC_DOMAIN is the address the image
+          # URLs use; here it points at the published MinIO port.
+          docker run --detach --name renderer-smoke --network "${network}" \
+            --env MINIO_ENDPOINT=minio-smoke \
+            --env MINIO_PORT=9000 \
+            --env MINIO_USE_SSL=false \
+            --env MINIO_ACCESS_KEY=admin \
+            --env MINIO_SECRET_KEY=12345678 \
+            --env MINIO_BUCKET=chart-images \
+            --env MINIO_PUBLIC_DOMAIN=http://127.0.0.1:19200 \
+            "${RENDERER_IMAGE}:${VERSION}"
+
+          # MCP server pointed at the renderer over the compose network.
+          docker run --detach --name mcp-smoke --network "${network}" \
+            --publish 1122:1122 \
+            --env VIS_REQUEST_SERVER=http://renderer-smoke:3000/generate \
+            --env DISABLED_TOOLS=generate_district_map,generate_path_map,generate_pin_map \
+            "${STREAMABLE_IMAGE}:${VERSION}"
+
+          tool_call='{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"generate_line_chart","arguments":{"data":[{"time":"2025-05","value":512},{"time":"2025-06","value":1024}],"title":"monthly visits"}}}'
+          chart_response=""
+          chart_url=""
+          for _ in $(seq 1 30); do
+            chart_response="$(curl --silent --max-time 60 \
+              --header 'Content-Type: application/json' \
+              --header 'Accept: application/json, text/event-stream' \
+              --data "${tool_call}" \
+              http://127.0.0.1:1122/mcp || true)"
+            chart_url="$(printf '%s' "${chart_response}" | jq --raw-output '.result.content[0].text // empty' 2>/dev/null || true)"
+            [ -n "${chart_url}" ] && break
+            sleep 2
+          done
+          echo "MCP tools/call responded with: ${chart_response}"
+          [ -n "${chart_url}" ]
+
+          # The URL has to serve a real PNG, not an error document.
+          curl --fail --silent --show-error --max-time 30 --output chart.png "${chart_url}"
+          file chart.png
+          file chart.png | grep --quiet 'PNG image data'
+
+      - name: Save images as tarballs
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          MINIO_TAG: ${{ env.MINIO_TAG }}
+        run: |
+          set -euo pipefail
+
           SSE_TAR="${SSE_IMAGE}-${VERSION}-linux-amd64.tar"
           STREAMABLE_TAR="${STREAMABLE_IMAGE}-${VERSION}-linux-amd64.tar"
+          RENDERER_TAR="${RENDERER_IMAGE}-${VERSION}-linux-amd64.tar"
+          MINIO_TAR="minio-${MINIO_TAG}-linux-amd64.tar"
           ALL_TAR="mcp-server-chart-all-${VERSION}-linux-amd64.tar"
 
           mkdir -p dist
           docker save --output "dist/${SSE_TAR}" "${SSE_IMAGE}:${VERSION}" "${SSE_IMAGE}:latest"
           docker save --output "dist/${STREAMABLE_TAR}" "${STREAMABLE_IMAGE}:${VERSION}" "${STREAMABLE_IMAGE}:latest"
-          # Single archive that carries both images, for offline environments.
+          docker save --output "dist/${RENDERER_TAR}" "${RENDERER_IMAGE}:${VERSION}" "${RENDERER_IMAGE}:latest"
+          docker save --output "dist/${MINIO_TAR}" "${MINIO_IMAGE}:${MINIO_TAG}"
+          # Single archive with everything the compose stack needs, for offline
+          # environments: one download, one `docker load`, `docker compose up`.
           docker save --output "dist/${ALL_TAR}" \
             "${SSE_IMAGE}:${VERSION}" "${SSE_IMAGE}:latest" \
-            "${STREAMABLE_IMAGE}:${VERSION}" "${STREAMABLE_IMAGE}:latest"
+            "${STREAMABLE_IMAGE}:${VERSION}" "${STREAMABLE_IMAGE}:latest" \
+            "${RENDERER_IMAGE}:${VERSION}" "${RENDERER_IMAGE}:latest" \
+            "${MINIO_IMAGE}:${MINIO_TAG}"
 
           (cd dist && sha256sum ./*.tar > SHA256SUMS.txt)
           ls -lh dist
@@ -150,6 +258,16 @@ jobs:
             echo '```'
             ls -lh dist
             echo '```'
+            echo
+            echo "On an offline machine, load the images and start the stack:"
+            echo
+            echo '```bash'
+            echo "docker load -i ${ALL_TAR}"
+            echo "docker compose up -d"
+            echo '```'
+            echo
+            echo "MCP endpoint: \`http://<host>:1122/mcp\` (streamable) — set"
+            echo "\`MCP_CHART_VERSION=${VERSION}\` if you also loaded the per-image tarballs."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload tarballs as workflow artifacts

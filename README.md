@@ -192,16 +192,36 @@ Options:
 
 You can use AntV's project [GPT-Vis-SSR](https://github.com/antvis/GPT-Vis/tree/main/bindings/gpt-vis-ssr) to deploy an HTTP service in a private environment, and then pass the URL address through env `VIS_REQUEST_SERVER`.
 
-A ready-to-use implementation of that service lives in [`docker/renderer`](./docker/renderer/README.md). It wraps `@antv/gpt-vis-ssr` in a small HTTP service that renders charts server-side, stores the PNG files and returns their URLs:
+A ready-to-use implementation of that service lives in [`docker/gpt-vis-api`](./docker/gpt-vis-api/README.md). It wraps `@antv/gpt-vis-ssr` in a small HTTP service (`pnpm start`) that renders charts server-side, stores the PNG files in MinIO and returns their URLs.
+
+The repository root ships a complete stack — MCP server, private renderer and MinIO:
 
 ```bash
-docker build -f docker/renderer/Dockerfile -t mcp-server-chart-renderer:local .
-docker run -d --name chart-renderer -p 3000:3000 \
-  -e PUBLIC_BASE_URL=http://<your-host>:3000 \
-  mcp-server-chart-renderer:local
+docker compose up -d
 ```
 
-`docker compose up -d` starts both the renderer and the MCP server. The renderer returns image URLs that the MCP client fetches, so `PUBLIC_BASE_URL` has to be an address the client can reach.
+The MCP server then listens on <http://127.0.0.1:1122/mcp> (streamable HTTP); add `--profile sse` for <http://127.0.0.1:1123/sse>. Chart generation works without internet access. The renderer returns image URLs that the MCP client fetches, so `MINIO_PUBLIC_DOMAIN` has to be an address the client can reach (default `http://127.0.0.1:19200`).
+
+#### Offline installation
+
+The [Package Docker Images](.github/workflows/docker-release.yml) workflow builds every image the stack needs and attaches the tarballs to each GitHub release:
+
+| Tarball | Image |
+| :--- | :--- |
+| `mcp-server-chart-sse-<version>-linux-amd64.tar` | MCP server, SSE transport |
+| `mcp-server-chart-streamable-<version>-linux-amd64.tar` | MCP server, streamable HTTP transport |
+| `mcp-server-chart-renderer-<version>-linux-amd64.tar` | Private SSR renderer (`docker/gpt-vis-api`) |
+| `minio-<tag>-linux-amd64.tar` | MinIO, image storage |
+| `mcp-server-chart-all-<version>-linux-amd64.tar` | All of the above in one file |
+
+Download `mcp-server-chart-all-<version>-linux-amd64.tar` on an offline machine, then:
+
+```bash
+docker load -i mcp-server-chart-all-<version>-linux-amd64.tar
+docker compose up -d
+```
+
+`sh docker/load-images.sh <directory>` loads every tarball in a directory if you downloaded them separately.
 
 - **Method**: `POST`
 - **Parameter**: Which will be passed to `GPT-Vis-SSR` for rendering. Such as, `{ "type": "line", "data": [{ "time": "2025-05", "value": 512 }, { "time": "2025-06", "value": 1024 }] }`.

@@ -1,12 +1,27 @@
+# Smoke-test compose: runs only the MCP server and points it at a render
+# service that is already reachable on the host, for example
+# `docker compose up -d` from the repository root, or
+# `cd docker/gpt-vis-api && pnpm start`.
+#
+#   docker compose -f docker-compose.test.yaml up -d
+#
+# The renderer answers POST /generate, so VIS_REQUEST_SERVER has to include that
+# path. Use docker-compose.yaml for the self-contained stack (server + renderer
+# + MinIO) instead of this file.
+name: mcp-server-chart-test
+
 services:
   mcp-server-chart:
+    image: mcp-server-chart-streamable:${MCP_CHART_VERSION:-latest}
     build:
-      context: .          
-      dockerfile: Dockerfile
-    image: mcp-server-chart:stable
+      context: .
+      dockerfile: docker/streamable/Dockerfile
     container_name: mcp-server-chart-1
+    extra_hosts:
+      # Lets the container reach a renderer published on the host's :3000.
+      - "host.docker.internal:host-gateway"
     environment:
-       - VIS_REQUEST_SERVER=http://localhost:3000/render
-    command: ["node", "build/index.js", "--transport", "streamable", "--port", "1122", "--host", "0.0.0.0"]
+      - VIS_REQUEST_SERVER=http://host.docker.internal:3000/generate
+      - DISABLED_TOOLS=generate_district_map,generate_path_map,generate_pin_map
     ports:
       - "1122:1122"
