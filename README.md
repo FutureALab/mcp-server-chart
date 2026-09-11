@@ -192,6 +192,17 @@ Options:
 
 You can use AntV's project [GPT-Vis-SSR](https://github.com/antvis/GPT-Vis/tree/main/bindings/gpt-vis-ssr) to deploy an HTTP service in a private environment, and then pass the URL address through env `VIS_REQUEST_SERVER`.
 
+A ready-to-use implementation of that service lives in [`docker/renderer`](./docker/renderer/README.md). It wraps `@antv/gpt-vis-ssr` in a small HTTP service that renders charts server-side, stores the PNG files and returns their URLs:
+
+```bash
+docker build -f docker/renderer/Dockerfile -t mcp-server-chart-renderer:local .
+docker run -d --name chart-renderer -p 3000:3000 \
+  -e PUBLIC_BASE_URL=http://<your-host>:3000 \
+  mcp-server-chart-renderer:local
+```
+
+`docker compose up -d` starts both the renderer and the MCP server. The renderer returns image URLs that the MCP client fetches, so `PUBLIC_BASE_URL` has to be an address the client can reach.
+
 - **Method**: `POST`
 - **Parameter**: Which will be passed to `GPT-Vis-SSR` for rendering. Such as, `{ "type": "line", "data": [{ "time": "2025-05", "value": 512 }, { "time": "2025-06", "value": 1024 }] }`.
 - **Return**: The return object of HTTP service.

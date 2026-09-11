@@ -1,14 +1,39 @@
 services:
+  # Private chart render service, see docker/renderer/README.md
+  chart-renderer:
+    build:
+      context: .
+      dockerfile: docker/renderer/Dockerfile
+    image: mcp-server-chart-renderer:local
+    container_name: mcp-server-chart-renderer-1
+    environment:
+      # The MCP client (browser / Claude Desktop / Dify ...) fetches the image URL
+      # returned by this service, so it must be an address the client can reach.
+      - PUBLIC_BASE_URL=http://127.0.0.1:3000
+    ports:
+      - "3000:3000"
+    volumes:
+      - chart-renderer-data:/var/lib/chart-renderer
+
   mcp-server-chart:
     build:
       context: .          # Dockerfile dir
       dockerfile: Dockerfile
     image: mcp-server-chart:stable
     container_name: mcp-server-chart-1
-    # environment:
-    #   - VIS_REQUEST_SERVER=http://127.0.0.1:3000/render  # Notice: You can use AntV's project GPT-Vis-SSR to deploy an HTTP service in a private environment, and then pass the URL address through env VIS_REQUEST_SERVER.
+    depends_on:
+      - chart-renderer
+    environment:
+      # Inside the compose network use the service name, not 127.0.0.1.
+      # You can use AntV's project GPT-Vis-SSR to deploy an HTTP service in a
+      # private environment, and then pass the URL address through env
+      # VIS_REQUEST_SERVER, see docker/renderer/README.md.
+      - VIS_REQUEST_SERVER=http://chart-renderer:3000/render
     command: ["node", "build/index.js", "--transport", "sse", "--port", "1122", "--host", "0.0.0.0"]
     ports:
       - "1122:1122"
 # networks:
 #     - internal
+
+volumes:
+  chart-renderer-data:
