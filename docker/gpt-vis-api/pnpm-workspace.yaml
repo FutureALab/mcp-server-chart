@@ -1,0 +1,15 @@
+# pnpm refuses to run a dependency's install script unless that dependency is
+# allowed here; otherwise `pnpm install` fails with ERR_PNPM_IGNORED_BUILDS.
+#
+# The `canvas` native module needs its install script: it either downloads a
+# prebuilt binary or compiles with node-gyp. Without it `require("canvas")`
+# fails at render time. The Dockerfile also rebuilds canvas with node-gyp, so
+# the system build dependencies are present in the image.
+#
+# `allowBuilds` is the pnpm >= 12 setting, `onlyBuiltDependencies` the pnpm 10/11
+# one; each version ignores the other's key.
+allowBuilds:
+  canvas: true
+
+onlyBuiltDependencies:
+  - canvas
