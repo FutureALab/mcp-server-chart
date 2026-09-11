@@ -33,6 +33,7 @@
 | `MINIO_BUCKET` | `chart-images` | 存放图片的 bucket，启动时自动创建 |
 | `MINIO_PUBLIC_READ` | `true` | 启动时把 bucket 设为匿名可读。客户端要直接打开图片地址，设为 `false` 会让所有图片返回 `403` |
 | `MINIO_PUBLIC_DOMAIN` | - | **返回给 MCP 客户端的图片地址前缀，必须是客户端能访问的地址** |
+| `RENDER_TIMEOUT_MS` | `30000` | 单张图的渲染超时，超时后该请求返回 `success:false`，服务继续处理其他请求 |
 
 ## 本地运行
 
@@ -74,3 +75,16 @@ docker build -t mcp-server-chart-renderer:local .
 3. **地理图表不可用**：`generate_district_map` / `generate_path_map` /
    `generate_pin_map` 依赖 AntV 的在线 POI 与地图数据，私有渲染服务无法提供。
    建议用 `DISABLED_TOOLS` 关掉这三个工具（compose 里已默认关闭）。
+4. **个别图表一直返回 500**：先看返回体里的 `errorMessage`（渲染失败按 README
+   约定用 `200 {"success":false,...}` 返回，不再只给一个 500 状态码）。如果提示
+   `Unknown chart type: xxx`，说明镜像里的 `@antv/gpt-vis-ssr` 版本太旧、还不支持
+   这个图表类型——例如 `0.2.2` 没有 `waterfall` 与 `spreadsheet`，所有
+   `generate_waterfall_chart` / `generate_spreadsheet` 请求都会 500；升级
+   `package.json` 里的版本（当前 `0.3.8`）后重新构建镜像即可。
+5. **某个图表失败后所有图表都失败**：渲染依赖（`@antv/g2-ssr` / `@antv/s2-ssr`）
+   在数据不满足要求时会抛进程级异常，例如 `violin` 每个分类只有一个值时抛
+   `TypeError: Cannot read properties of undefined (reading '0')` 且 `render()`
+   永不返回，Node 默认会直接退出进程，后续请求全部变成
+   `socket hang up` / `connect ECONNREFUSED`。服务已对这类异常做了兜底：只有该请求
+   失败（`success:false`），不会退出进程；超过 `RENDER_TIMEOUT_MS` 仍未返回的渲染
+   也会被超时中断。

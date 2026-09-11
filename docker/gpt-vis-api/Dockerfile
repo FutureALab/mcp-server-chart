@@ -65,9 +65,12 @@ COPY . .
 # Install dependencies
 RUN pnpm install
 
-# Rebuild the canvas module (if needed)
-RUN cd node_modules/.pnpm/canvas@2.11.2/node_modules/canvas && \
-    pnpm exec node-gyp rebuild
+# Rebuild the canvas native module from source, so it links against the system
+# cairo/pango libraries installed above. The path is looked up in the pnpm
+# virtual store because the version changes with @antv/gpt-vis-ssr.
+RUN canvas_dir="$(find node_modules/.pnpm -maxdepth 4 -type d -path '*/node_modules/canvas' | head -n 1)"; \
+    echo "Rebuilding canvas in ${canvas_dir}"; \
+    test -n "${canvas_dir}" && cd "${canvas_dir}" && pnpm exec node-gyp rebuild
 
 # Expose the port
 EXPOSE 3000
